@@ -11,6 +11,7 @@ logs/
 
 # Rust / Cargo
 backend/target/
+backend/target2/
 
 # Node / Vite
 frontend/node_modules/

@@ -145,6 +145,10 @@ cargo run --release
 - `AGENT_SCRIPT`：Python agent 路径（默认 `../agent.py`，即仓库根目录 `agent.py`）
 - `PYTHON_BIN`：Python 可执行文件名（默认 `python3`）
 - `LOG_DIR`：后端与 agent 写入日志的目录（默认 `../logs`，即仓库根目录 `logs/`，会生成 `backend.log` / `agent.log`）
+- `DAILY_LIMIT_PER_BROWSER`：每个浏览器每日允许使用次数（默认 `0` 不限制；设置为 `1` 表示每天一次，基于 cookie `vs_bid`）
+- `BYPASS_KEY`：绕过每日限制的 Key（前端可在“高级选项”输入，或请求头携带 `X-VS-Bypass-Key`）
+- `JOBS_TTL_SECONDS`：job 结果缓存保留时间（秒，默认 `3600`；`0` 表示不自动删除）
+- `JOBS_CLEANUP_INTERVAL_SECONDS`：后台清理扫描间隔（秒，默认 `600`）
 
 Rust 后端提供的 API 与 FastAPI 版本保持一致，可以直接被前端或第三方服务调用。
 
