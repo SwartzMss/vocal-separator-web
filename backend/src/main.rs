@@ -19,9 +19,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::{fs, fs::File, io::AsyncWriteExt, net::TcpListener, process::Command};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
+use tokio::{fs, fs::File, fs::OpenOptions, io::AsyncWriteExt, net::TcpListener, process::Command};
 use tokio_util::io::ReaderStream;
 use tracing::{error, info};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -45,6 +45,8 @@ struct AppState {
     usage: Arc<Mutex<HashMap<String, DailyUsage>>>,
     jobs_ttl_seconds: u64,
     jobs_cleanup_interval_seconds: u64,
+    request_records_file: PathBuf,
+    request_records_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -101,7 +103,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let bypass_key = env::var("BYPASS_KEY").ok().and_then(|value| {
         let trimmed = value.trim().to_string();
-        if trimmed.is_empty() { None } else { Some(trimmed) }
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
     });
 
     let jobs_ttl_seconds: u64 = env::var("JOBS_TTL_SECONDS")
@@ -114,6 +120,23 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|value| value.parse().ok())
         .unwrap_or(600);
 
+    let request_records_file =
+        env::var("REQUEST_RECORD_FILE").unwrap_or_else(|_| default_request_records_file());
+    let request_records_file = absolute_path(request_records_file)?;
+    if let Some(parent) = request_records_file.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).await?;
+    }
+    if let Err(err) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&request_records_file)
+        .await
+    {
+        error!("failed to initialize request record file {request_records_file:?}: {err}");
+    }
+
     let state = AppState {
         jobs_dir,
         agent_script,
@@ -123,6 +146,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         usage: Arc::new(Mutex::new(HashMap::new())),
         jobs_ttl_seconds,
         jobs_cleanup_interval_seconds,
+        request_records_file,
+        request_records_lock: Arc::new(Mutex::new(())),
     };
 
     if state.jobs_ttl_seconds > 0 {
@@ -200,11 +225,28 @@ fn default_agent_script() -> String {
         .to_string()
 }
 
+fn default_request_records_file() -> String {
+    if is_backend_workdir() {
+        "../request_records.txt".into()
+    } else {
+        "request_records.txt".into()
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct JobResponse {
     job_id: String,
     instrumental_url: String,
     vocals_url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestRecord {
+    ts_rfc3339: String,
+    bypass: bool,
+    outcome: String,
+    filename: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,7 +257,16 @@ struct AgentResponse {
     instrumental: String,
 }
 
-async fn create_job(State(state): State<AppState>, headers: HeaderMap, multipart: Multipart) -> Response {
+struct JobWithMeta {
+    response: JobResponse,
+    file_name: Option<String>,
+}
+
+async fn create_job(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    multipart: Multipart,
+) -> Response {
     let (browser_id, set_cookie) = get_or_create_browser_id(&headers);
     let bypass = has_valid_bypass_key(&headers, state.bypass_key.as_deref());
 
@@ -223,6 +274,19 @@ async fn create_job(State(state): State<AppState>, headers: HeaderMap, multipart
         && !bypass
         && let Err(err) = reserve_daily_slot(&state, &browser_id).await
     {
+        let ts_rfc3339 = now_timestamp_rfc3339();
+        append_request_record(
+            &state,
+            RequestRecord {
+                ts_rfc3339,
+                bypass,
+                outcome: err.outcome().to_string(),
+                filename: None,
+                error: Some(err.to_string()),
+            },
+        )
+        .await;
+
         let mut response = err.into_response();
         if let Some(cookie) = set_cookie {
             response.headers_mut().insert(header::SET_COOKIE, cookie);
@@ -238,21 +302,165 @@ async fn create_job(State(state): State<AppState>, headers: HeaderMap, multipart
         }
     }
 
-    let mut response = result.into_response();
+    match &result {
+        Ok(job) => {
+            let ts_rfc3339 = now_timestamp_rfc3339();
+            append_request_record(
+                &state,
+                RequestRecord {
+                    ts_rfc3339,
+                    bypass,
+                    outcome: "success".into(),
+                    filename: job.file_name.clone(),
+                    error: None,
+                },
+            )
+            .await;
+        }
+        Err(err) => {
+            let ts_rfc3339 = now_timestamp_rfc3339();
+            append_request_record(
+                &state,
+                RequestRecord {
+                    ts_rfc3339,
+                    bypass,
+                    outcome: err.outcome().to_string(),
+                    filename: None,
+                    error: Some(err.to_string()),
+                },
+            )
+            .await;
+        }
+    }
+
+    let mut response = result.map(|job| Json(job.response)).into_response();
     if let Some(cookie) = set_cookie {
         response.headers_mut().insert(header::SET_COOKIE, cookie);
     }
     response
 }
 
+fn now_timestamp_rfc3339() -> String {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let unix_ms = duration.as_millis() as u64;
+    format_unix_ms_rfc3339_local(unix_ms)
+}
+
+fn format_unix_ms_rfc3339_local(unix_ms: u64) -> String {
+    let secs = (unix_ms / 1000) as i64;
+    let millis = (unix_ms % 1000) as u32;
+    let offset_seconds = local_offset_seconds(secs)
+        .map(i64::from)
+        .filter(|offset| offset.rem_euclid(60) == 0)
+        .unwrap_or(0);
+    let local_secs = secs.saturating_add(offset_seconds);
+
+    let days = local_secs.div_euclid(86_400);
+    let secs_of_day = local_secs.rem_euclid(86_400) as u32;
+
+    let hour = secs_of_day / 3600;
+    let minute = (secs_of_day % 3600) / 60;
+    let second = secs_of_day % 60;
+
+    let (year, month, day) = civil_from_days(days);
+
+    let (offset_sign, offset_abs) = if offset_seconds >= 0 {
+        ('+', offset_seconds as u32)
+    } else {
+        ('-', (-offset_seconds) as u32)
+    };
+    let offset_hour = offset_abs / 3600;
+    let offset_minute = (offset_abs % 3600) / 60;
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}{}{:02}:{:02}",
+        year, month, day, hour, minute, second, millis, offset_sign, offset_hour, offset_minute
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn local_offset_seconds(unix_seconds: i64) -> Option<i32> {
+    let t: libc::time_t = unix_seconds;
+    let mut local_tm: libc::tm = unsafe { std::mem::zeroed() };
+    let result = unsafe { libc::localtime_r(&t, &mut local_tm) };
+    if result.is_null() {
+        return None;
+    }
+    Some(local_tm.tm_gmtoff as i32)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn local_offset_seconds(_unix_seconds: i64) -> Option<i32> {
+    None
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096).div_euclid(365);
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2).div_euclid(153);
+    let d = doy - (153 * mp + 2).div_euclid(5) + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let year = (y + if m <= 2 { 1 } else { 0 }) as i32;
+    let month = m as u32;
+    let day = d as u32;
+    (year, month, day)
+}
+
+async fn append_request_record(state: &AppState, record: RequestRecord) {
+    let line = match serde_json::to_string(&record) {
+        Ok(line) => line,
+        Err(err) => {
+            error!("failed to serialize request record: {err}");
+            return;
+        }
+    };
+
+    let _guard = state.request_records_lock.lock().await;
+    let mut file = match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&state.request_records_file)
+        .await
+    {
+        Ok(file) => file,
+        Err(err) => {
+            error!(
+                "failed to open request record file {:?}: {err}",
+                state.request_records_file
+            );
+            return;
+        }
+    };
+
+    if let Err(err) = file.write_all(line.as_bytes()).await {
+        error!(
+            "failed to write request record to {:?}: {err}",
+            state.request_records_file
+        );
+        return;
+    }
+    if let Err(err) = file.write_all(b"\n").await {
+        error!(
+            "failed to write request record newline to {:?}: {err}",
+            state.request_records_file
+        );
+    }
+}
+
 async fn create_job_inner(
     state: &AppState,
     mut multipart: Multipart,
-) -> Result<Json<JobResponse>, AppError> {
+) -> Result<JobWithMeta, AppError> {
     while let Some(field) = multipart.next_field().await? {
         if field.name() == Some("file") {
             let response = handle_file_upload(state, field).await?;
-            return Ok(Json(response));
+            return Ok(response);
         }
     }
     Err(AppError::BadRequest("file field missing".into()))
@@ -261,7 +469,7 @@ async fn create_job_inner(
 async fn handle_file_upload(
     state: &AppState,
     field: axum::extract::multipart::Field<'_>,
-) -> Result<JobResponse, AppError> {
+) -> Result<JobWithMeta, AppError> {
     let file_name = field
         .file_name()
         .map(str::to_string)
@@ -300,10 +508,13 @@ async fn handle_file_upload(
 
     info!("Job {} completed", job_id);
 
-    Ok(JobResponse {
-        job_id: job_id.clone(),
-        instrumental_url: format!("/api/jobs/{job_id}/instrumental"),
-        vocals_url: format!("/api/jobs/{job_id}/vocals"),
+    Ok(JobWithMeta {
+        response: JobResponse {
+            job_id: job_id.clone(),
+            instrumental_url: format!("/api/jobs/{job_id}/instrumental"),
+            vocals_url: format!("/api/jobs/{job_id}/vocals"),
+        },
+        file_name: Some(file_name),
     })
 }
 
@@ -467,7 +678,10 @@ fn has_valid_bypass_key(headers: &HeaderMap, expected: Option<&str>) -> bool {
     let Some(expected) = expected else {
         return false;
     };
-    let Some(actual) = headers.get(BYPASS_KEY_HEADER).and_then(|value| value.to_str().ok()) else {
+    let Some(actual) = headers
+        .get(BYPASS_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+    else {
         return false;
     };
     actual.trim() == expected
@@ -506,19 +720,20 @@ fn get_cookie_value(cookie: &str, name: &str) -> Option<String> {
 
 fn is_reasonable_cookie_value(value: &str) -> bool {
     let len = value.len();
-    (16..=128).contains(&len) && value.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+    (16..=128).contains(&len)
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
 }
 
 async fn reserve_daily_slot(state: &AppState, browser_id: &str) -> Result<(), AppError> {
     let today = utc_day_number();
     let mut usage = state.usage.lock().await;
-    let entry = usage
-        .entry(browser_id.to_string())
-        .or_insert(DailyUsage {
-            day: today,
-            used: 0,
-            in_progress: false,
-        });
+    let entry = usage.entry(browser_id.to_string()).or_insert(DailyUsage {
+        day: today,
+        used: 0,
+        in_progress: false,
+    });
 
     if entry.day != today {
         entry.day = today;
@@ -550,13 +765,11 @@ async fn release_daily_slot(state: &AppState, browser_id: &str) {
 async fn mark_daily_success(state: &AppState, browser_id: &str) {
     let today = utc_day_number();
     let mut usage = state.usage.lock().await;
-    let entry = usage
-        .entry(browser_id.to_string())
-        .or_insert(DailyUsage {
-            day: today,
-            used: 0,
-            in_progress: false,
-        });
+    let entry = usage.entry(browser_id.to_string()).or_insert(DailyUsage {
+        day: today,
+        used: 0,
+        in_progress: false,
+    });
 
     if entry.day != today {
         entry.day = today;
@@ -584,6 +797,20 @@ enum AppError {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     AgentFailure(String),
+}
+
+impl AppError {
+    fn outcome(&self) -> &'static str {
+        match self {
+            AppError::BadRequest(_) => "bad_request",
+            AppError::TooManyRequests(_) => "too_many_requests",
+            AppError::NotFound => "not_found",
+            AppError::AgentFailure(_)
+            | AppError::Io(_)
+            | AppError::Json(_)
+            | AppError::Multipart(_) => "error",
+        }
+    }
 }
 
 impl IntoResponse for AppError {

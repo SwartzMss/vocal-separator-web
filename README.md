@@ -95,6 +95,7 @@ cargo run --release
 - `AGENT_SCRIPT`：Python agent 路径（默认 `../python/agent.py`）
 - `PYTHON_BIN`：Python 可执行文件名（默认 `python3`）
 - `LOG_DIR`：后端与 agent 写入日志的目录（默认 `../logs`，即仓库根目录 `logs/`，会生成 `backend.log` / `agent.log`）
+- `REQUEST_RECORD_FILE`：记录每次 `/api/jobs` 调用结果（成功 / 失败 / 超次数）的文件路径（默认 `../request_records.txt`，即仓库根目录 `request_records.txt`）
 - `DAILY_LIMIT_PER_BROWSER`：每个浏览器每日允许使用次数（默认 `0` 不限制；设置为 `1` 表示每天一次，基于 cookie `vs_bid`）
 - `BYPASS_KEY`：绕过每日限制的 Key（前端可在“高级选项”输入，或请求头携带 `X-VS-Bypass-Key`）
 - `JOBS_TTL_SECONDS`：job 结果缓存保留时间（秒，默认 `3600`；`0` 表示不自动删除）
