@@ -1,3 +1,5 @@
+"""Demucs process runner for two-stem separation."""
+
 import os
 import subprocess
 import sys

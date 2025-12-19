@@ -9,7 +9,7 @@
 
 - 🎵 人声 / 伴奏分离（`vocals.wav` / `no_vocals.wav`）
 - ⚡ GPU 加速（CUDA / RTX 3090 实测秒级）
-- 🌐 Web API（FastAPI）
+- 🌐 Web API（Rust / Axum）
 - 🧱 并发限制，避免 GPU OOM
 - 📦 支持多种音频格式（mp3 / wav / m4a / flac / ogg / aac）
 
@@ -19,7 +19,7 @@
 
 - **Demucs**：音频源分离模型
 - **PyTorch (CUDA)**：GPU 推理
-- **FastAPI**：Web API
+- **Axum (Rust)**：Web API
 - **FFmpeg**：音频解码
 - **Python 3.10+**
 - **WSL2 + NVIDIA GPU**
@@ -71,65 +71,15 @@ PY
 
 ### 3️⃣ 安装依赖
 ```bash
-pip install -r requirements.txt
+pip install -r python/requirements.txt
 sudo apt install -y ffmpeg
 ```
 
-> ⚠️ `requirements.txt` 不会自动安装 GPU 版 PyTorch，请按上一步的指引单独安装。
+> ⚠️ `python/requirements.txt` 不会自动安装 GPU 版 PyTorch，请按上一步的指引单独安装。
 
 ---
 
 ## 🚀 启动服务
-
-```bash
-uvicorn app:app --host 0.0.0.0 --port 8000
-```
-
-可用环境变量：
-
-- `MAX_CONCURRENT_JOBS`：允许的并发任务数量（默认 `1`）
-- `DEMUCS_MODEL`：Demucs 模型名称（默认 `mdx_extra_q`）
-- `DEMUCS_DEVICE`：运行设备（默认 `cuda`）
-
-打开浏览器访问：
-
-- Swagger UI：  
-  👉 http://localhost:8000/docs
-
----
-
-## 🛠 CLI 使用
-
-无需启动 Web 服务即可在本地生成结果：
-
-```bash
-python cli.py /path/to/song.mp3 -o outputs
-```
-
-- 输入支持 `.mp3/.wav/.m4a/.flac/.ogg/.aac`
-- 输出目录默认为 `outputs/`，会生成 `xxx_vocals.wav` / `xxx_instrumental.wav`
-- CLI 同样读取 `DEMUCS_MODEL` / `DEMUCS_DEVICE` 环境变量
-
----
-
-## 🤖 Python Agent（子进程模式）
-
-给 Rust / 其他后端调用的无头版本：
-
-```bash
-python agent.py --input /tmp/song.mp3 --output-dir /tmp/job123
-```
-
-- 输出目录中会生成 `vocals.wav` 与 `instrumental.wav`
-- 成功时 stdout 返回 `{"vocals": "...", "instrumental": "..."}` JSON
-- 失败时 stderr 输出 error JSON，退出码非 0
-- 同样支持 `DEMUCS_MODEL` / `DEMUCS_DEVICE`
-
----
-
-## 🦀 Rust 后端（调度 + API）
-
-Rust 负责 HTTP / 并发 / Agent 调用，Python 仅做推理：
 
 ```bash
 cd backend
@@ -138,11 +88,11 @@ cargo run
 cargo run --release
 ```
 
-默认监听 `0.0.0.0:8000`，并会调用仓库根目录的 `agent.py`。可用环境变量：
+默认监听 `0.0.0.0:8000`，并会调用仓库中的 `python/agent.py`。可用环境变量：
 
 - `HOST` / `PORT`：监听地址与端口（默认 `0.0.0.0` / `8000`）
 - `JOBS_DIR`：任务输出目录（默认 `../jobs`，即仓库根目录 `jobs/`）
-- `AGENT_SCRIPT`：Python agent 路径（默认 `../agent.py`，即仓库根目录 `agent.py`）
+- `AGENT_SCRIPT`：Python agent 路径（默认 `../python/agent.py`）
 - `PYTHON_BIN`：Python 可执行文件名（默认 `python3`）
 - `LOG_DIR`：后端与 agent 写入日志的目录（默认 `../logs`，即仓库根目录 `logs/`，会生成 `backend.log` / `agent.log`）
 - `DAILY_LIMIT_PER_BROWSER`：每个浏览器每日允许使用次数（默认 `0` 不限制；设置为 `1` 表示每天一次，基于 cookie `vs_bid`）
@@ -150,7 +100,20 @@ cargo run --release
 - `JOBS_TTL_SECONDS`：job 结果缓存保留时间（秒，默认 `3600`；`0` 表示不自动删除）
 - `JOBS_CLEANUP_INTERVAL_SECONDS`：后台清理扫描间隔（秒，默认 `600`）
 
-Rust 后端提供的 API 与 FastAPI 版本保持一致，可以直接被前端或第三方服务调用。
+---
+
+## 🤖 Python Agent（子进程模式）
+
+给 Rust / 其他后端调用的无头版本：
+
+```bash
+python python/agent.py --input /tmp/song.mp3 --output-dir /tmp/job123
+```
+
+- 输出目录中会生成 `vocals.wav` 与 `instrumental.wav`
+- 成功时 stdout 返回 `{"vocals": "...", "instrumental": "..."}` JSON
+- 失败时 stderr 输出 error JSON，退出码非 0
+- 同样支持 `DEMUCS_MODEL` / `DEMUCS_DEVICE`
 
 ---
 
@@ -177,7 +140,7 @@ npm run dev        # 默认 5173 端口
 
 `scripts/` 目录内提供了 Rain 项目的通用脚本，已适配本仓库：
 
-- `scripts/build.sh`：校验 `cargo`/`npm`/`python3`/`pip` 后执行 `cargo clippy`、`cargo build --release`、`npm run build`，并自动执行 `pip install -r requirements.txt`（全局环境）。
+- `scripts/build.sh`：校验 `cargo`/`npm`/`python3`/`pip` 后执行 `cargo clippy`、`cargo build --release`、`npm run build`，并自动执行 `pip install -r python/requirements.txt`（全局环境）。
 - `scripts/deploy.sh`：需要 `sudo`，集成构建、静态资源同步、systemd 单元与 nginx 配置。默认服务名 `vocal-separator-web`，静态目录 `/var/www/vocal-separator-web`。服务进程默认以 `sudo` 发起者身份运行（可通过 `.env` 设置 `SERVICE_USER` 覆盖），其余路径/端口/证书信息也都来自 `.env`。
 
 在首次部署前，复制 `backend/.env.example` 为 `backend/.env` 并按需修改证书路径、域名、监听地址等配置：
@@ -187,7 +150,7 @@ cp backend/.env.example backend/.env
 vim backend/.env
 ```
 
-如果上传的音频较大，可修改 `.env` 中的 `CLIENT_MAX_BODY_SIZE`（默认 `200M`），部署脚本会自动把它写入 nginx `client_max_body_size`。同样地，通过 `JOBS_DIR` / `LOG_DIR` / `AGENT_SCRIPT` 可以把上传与日志目录指向仓库（默认值已经是 `../jobs`、`../logs`、`../agent.py`，以 WorkingDirectory `backend/` 为基准）。
+如果上传的音频较大，可修改 `.env` 中的 `CLIENT_MAX_BODY_SIZE`（默认 `200M`），部署脚本会自动把它写入 nginx `client_max_body_size`。同样地，通过 `JOBS_DIR` / `LOG_DIR` / `AGENT_SCRIPT` 可以把上传与日志目录指向仓库（默认值已经是 `../jobs`、`../logs`、`../python/agent.py`，以 WorkingDirectory `backend/` 为基准）。
 
 部署流程示例：
 
@@ -277,4 +240,4 @@ MIT License
 
 - Meta AI - Demucs  
 - PyTorch 社区  
-- FastAPI
+- Axum

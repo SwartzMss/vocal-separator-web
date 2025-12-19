@@ -66,7 +66,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
-    let log_dir = env::var("LOG_DIR").unwrap_or_else(|_| "logs".into());
+    let log_dir = env::var("LOG_DIR").unwrap_or_else(|_| default_logs_dir());
     let log_dir = absolute_path(log_dir)?;
     stdfs::create_dir_all(&log_dir)?;
     let file_appender = tracing_appender::rolling::never(&log_dir, "backend.log");
@@ -85,11 +85,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with(file_layer)
         .init();
 
-    let jobs_dir = env::var("JOBS_DIR").unwrap_or_else(|_| "jobs".into());
+    let jobs_dir = env::var("JOBS_DIR").unwrap_or_else(|_| default_jobs_dir());
     let jobs_dir = absolute_path(jobs_dir)?;
     fs::create_dir_all(&jobs_dir).await?;
 
-    let agent_script = env::var("AGENT_SCRIPT").unwrap_or_else(|_| "agent.py".into());
+    let agent_script = env::var("AGENT_SCRIPT").unwrap_or_else(|_| default_agent_script());
     let agent_script = absolute_path(agent_script)?;
 
     let python_bin = env::var("PYTHON_BIN").unwrap_or_else(|_| "python3".into());
@@ -160,6 +160,44 @@ fn absolute_path<P: AsRef<Path>>(path: P) -> Result<PathBuf, std::io::Error> {
     } else {
         Ok(std::env::current_dir()?.join(path))
     }
+}
+
+fn is_backend_workdir() -> bool {
+    std::env::current_dir()
+        .ok()
+        .map(|dir| dir.join("Cargo.toml").exists() && dir.join("src/main.rs").exists())
+        .unwrap_or(false)
+}
+
+fn default_jobs_dir() -> String {
+    if is_backend_workdir() {
+        "../jobs".into()
+    } else {
+        "jobs".into()
+    }
+}
+
+fn default_logs_dir() -> String {
+    if is_backend_workdir() {
+        "../logs".into()
+    } else {
+        "logs".into()
+    }
+}
+
+fn default_agent_script() -> String {
+    let candidates: &[&str] = if is_backend_workdir() {
+        &["../python/agent.py", "../agent.py", "agent.py"]
+    } else {
+        &["python/agent.py", "agent.py"]
+    };
+
+    candidates
+        .iter()
+        .copied()
+        .find(|candidate| Path::new(candidate).exists())
+        .unwrap_or(candidates[0])
+        .to_string()
 }
 
 #[derive(Debug, Serialize)]

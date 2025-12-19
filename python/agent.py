@@ -9,11 +9,11 @@ from pathlib import Path
 
 from separation import ALLOWED_EXTENSIONS, run_demucs
 
-BASE_DIR = Path(__file__).resolve().parent
+REPO_DIR = Path(__file__).resolve().parents[1]
 
 
 def configure_logger() -> logging.Logger:
-    log_dir = Path(os.getenv("LOG_DIR", BASE_DIR / "logs"))
+    log_dir = Path(os.getenv("LOG_DIR", REPO_DIR / "logs"))
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = Path(os.getenv("AGENT_LOG_FILE", log_dir / "agent.log"))
 

@@ -5,7 +5,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BACKEND_DIR="${BACKEND_DIR:-$ROOT/backend}"
 FRONTEND_DIR="${FRONTEND_DIR:-$ROOT/frontend}"
-PY_REQUIREMENTS_FILE="${PY_REQUIREMENTS_FILE:-$ROOT/requirements.txt}"
+PY_REQUIREMENTS_FILE="${PY_REQUIREMENTS_FILE:-}"
+
+if [[ -z "$PY_REQUIREMENTS_FILE" ]]; then
+  if [[ -f "$ROOT/python/requirements.txt" ]]; then
+    PY_REQUIREMENTS_FILE="$ROOT/python/requirements.txt"
+  else
+    PY_REQUIREMENTS_FILE="$ROOT/requirements.txt"
+  fi
+fi
 
 require_cmd() {
   for cmd in "$@"; do
